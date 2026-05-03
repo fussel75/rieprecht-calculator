@@ -2,7 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
-import { registerRoutes, refreshAllMarketPrices } from "./routes";
+import { registerRoutes, refreshAllMarketPrices, runTaskReminders } from "./routes";
 import { serveStatic } from "./static";
 import { storage } from "./storage";
 import partnerRoutes from "./partnerRoutes";
@@ -164,6 +164,21 @@ app.use((req, res, next) => {
 
       setTimeout(() => runDailyMarketRefresh(), 10000);
       setInterval(() => runDailyMarketRefresh(), TWENTY_FOUR_HOURS);
+
+      // Aufgaben-Reminder alle 30 Minuten prüfen (24h-Vorlauf + Eskalation)
+      const THIRTY_MINUTES = 30 * 60 * 1000;
+      const runTaskReminderJob = async () => {
+        try {
+          const result = await runTaskReminders();
+          if (result.reminders > 0 || result.escalations > 0) {
+            log(`Task reminders sent: ${result.reminders} reminders, ${result.escalations} escalations`);
+          }
+        } catch (err) {
+          console.error("Task reminder job failed:", err);
+        }
+      };
+      setTimeout(() => runTaskReminderJob(), 20000);
+      setInterval(() => runTaskReminderJob(), THIRTY_MINUTES);
     },
   );
 })();

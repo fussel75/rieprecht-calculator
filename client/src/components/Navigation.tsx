@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Calculator, DollarSign, Calendar, Boxes, Package, Truck, LogOut, User, Shield, Menu, Users, X, UserCircle, Tag, Target, FileSpreadsheet, ClipboardList } from "lucide-react";
+import { LayoutDashboard, Calculator, DollarSign, Calendar, Boxes, Package, Truck, LogOut, User, Shield, Menu, Users, X, UserCircle, Tag, Target, FileSpreadsheet, ClipboardList, CheckSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ export function Navigation() {
     { href: "/planning", label: "Planung", icon: Calendar },
     { href: "/trips", label: "Fahrten", icon: Truck },
     { href: "/customers", label: "Kunden", icon: UserCircle },
+    { href: "/tasks", label: "Aufgaben & Notizen", icon: CheckSquare },
   ];
 
   const adminLinks = [
@@ -163,6 +164,7 @@ export function MobileNav() {
     { href: "/planning", label: "Planung", icon: Calendar },
     { href: "/trips", label: "Fahrten", icon: Truck },
     { href: "/customers", label: "Kunden", icon: UserCircle },
+    { href: "/tasks", label: "Aufgaben & Notizen", icon: CheckSquare },
   ];
 
   const adminLinks = [

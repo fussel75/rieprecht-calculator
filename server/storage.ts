@@ -1,6 +1,7 @@
 import { db } from "./db";
 import {
   materials, costVariables, planningSettings, quotes, vehicles, employees, containers, trips, users, loans, loanPayments, customers, marketPrices, salesPrices, salesFixedPrices, offerCounters, forecastScenarios, bwaReports, articles, purchaseSurcharges, salesSurcharges,
+  tasks, taskAssignees, taskComments, taskAttachments, taskReminderLog, notes, noteAttachments, userNotificationSettings,
   type Material, type InsertMaterial,
   type PurchaseSurcharge, type InsertPurchaseSurcharge,
   type SalesSurcharge, type InsertSalesSurcharge,
@@ -20,9 +21,25 @@ import {
   type SalesFixedPrice, type InsertSalesFixedPrice,
   type ForecastScenario, type InsertForecastScenario,
   type BwaReport, type InsertBwaReport,
-  type Article, type InsertArticle
+  type Article, type InsertArticle,
+  type Task, type InsertTask,
+  type TaskComment, type InsertTaskComment,
+  type TaskAssignee, type TaskAttachment,
+  type Note, type InsertNote,
+  type NoteAttachment,
+  type UserNotificationSettings, type InsertUserNotificationSettings,
 } from "@shared/schema";
-import { eq, desc, and, ilike, sql, gte, lte } from "drizzle-orm";
+import { eq, desc, asc, and, or, ilike, sql, gte, lte, inArray, isNull, isNotNull } from "drizzle-orm";
+
+export type TaskWithRelations = Task & {
+  assigneeIds: number[];
+  attachments: Array<Pick<TaskAttachment, "id" | "filename" | "mimeType" | "size" | "uploadedById" | "uploadedAt">>;
+  commentCount: number;
+};
+
+export type NoteWithAttachments = Note & {
+  attachments: Array<Pick<NoteAttachment, "id" | "filename" | "mimeType" | "size" | "uploadedById" | "uploadedAt">>;
+};
 
 export interface IStorage {
   // Vehicles
@@ -744,6 +761,252 @@ export class DatabaseStorage implements IStorage {
       return updated;
     }
     return this.createBwaReport(report);
+  }
+
+  // ============================================================
+  // Aufgaben & Notizen
+  // ============================================================
+
+  private async hydrateTasks(rows: Task[]): Promise<TaskWithRelations[]> {
+    if (rows.length === 0) return [];
+    const ids = rows.map(t => t.id);
+    const [assignees, attachmentRows, commentRows] = await Promise.all([
+      db.select().from(taskAssignees).where(inArray(taskAssignees.taskId, ids)),
+      db.select({
+        id: taskAttachments.id, taskId: taskAttachments.taskId,
+        filename: taskAttachments.filename, mimeType: taskAttachments.mimeType,
+        size: taskAttachments.size, uploadedById: taskAttachments.uploadedById,
+        uploadedAt: taskAttachments.uploadedAt,
+      }).from(taskAttachments).where(inArray(taskAttachments.taskId, ids)),
+      db.select({ taskId: taskComments.taskId, n: sql<number>`count(*)::int` })
+        .from(taskComments).where(inArray(taskComments.taskId, ids)).groupBy(taskComments.taskId),
+    ]);
+    return rows.map(t => ({
+      ...t,
+      assigneeIds: assignees.filter(a => a.taskId === t.id).map(a => a.userId),
+      attachments: attachmentRows.filter(a => a.taskId === t.id).map(({ taskId, ...rest }) => rest),
+      commentCount: commentRows.find(c => c.taskId === t.id)?.n ?? 0,
+    }));
+  }
+
+  async getTasksForUser(userId: number): Promise<TaskWithRelations[]> {
+    const assigneeRows = await db.select({ taskId: taskAssignees.taskId })
+      .from(taskAssignees).where(eq(taskAssignees.userId, userId));
+    const assignedIds = assigneeRows.map(r => r.taskId);
+    const rows = await db.select().from(tasks).where(
+      assignedIds.length > 0
+        ? or(eq(tasks.createdById, userId), inArray(tasks.id, assignedIds))!
+        : eq(tasks.createdById, userId)
+    ).orderBy(desc(tasks.createdAt));
+    return this.hydrateTasks(rows);
+  }
+
+  async getAllTasks(): Promise<TaskWithRelations[]> {
+    const rows = await db.select().from(tasks).orderBy(desc(tasks.createdAt));
+    return this.hydrateTasks(rows);
+  }
+
+  async getTaskById(id: number): Promise<TaskWithRelations | undefined> {
+    const [row] = await db.select().from(tasks).where(eq(tasks.id, id));
+    if (!row) return undefined;
+    const [hydrated] = await this.hydrateTasks([row]);
+    return hydrated;
+  }
+
+  async createTask(input: InsertTask, createdById: number, assigneeIds: number[] = []): Promise<TaskWithRelations> {
+    const [task] = await db.insert(tasks).values({ ...input, createdById }).returning();
+    const uniqueAssignees = Array.from(new Set(assigneeIds));
+    if (uniqueAssignees.length > 0) {
+      await db.insert(taskAssignees).values(uniqueAssignees.map(uid => ({ taskId: task.id, userId: uid })));
+    }
+    const result = await this.getTaskById(task.id);
+    return result!;
+  }
+
+  async updateTask(id: number, updates: Partial<InsertTask>, assigneeIds?: number[]): Promise<TaskWithRelations | undefined> {
+    await db.update(tasks).set({ ...updates, updatedAt: new Date() }).where(eq(tasks.id, id));
+    if (assigneeIds) {
+      await db.delete(taskAssignees).where(eq(taskAssignees.taskId, id));
+      const uniqueAssignees = Array.from(new Set(assigneeIds));
+      if (uniqueAssignees.length > 0) {
+        await db.insert(taskAssignees).values(uniqueAssignees.map(uid => ({ taskId: id, userId: uid })));
+      }
+      // Status changed: clear reminder log so new escalations can fire later
+      await db.delete(taskReminderLog).where(eq(taskReminderLog.taskId, id));
+    }
+    return this.getTaskById(id);
+  }
+
+  async completeTask(id: number, userId: number): Promise<TaskWithRelations | undefined> {
+    await db.update(tasks).set({
+      status: "erledigt",
+      completedAt: new Date(),
+      completedById: userId,
+      updatedAt: new Date(),
+    }).where(eq(tasks.id, id));
+    return this.getTaskById(id);
+  }
+
+  async reopenTask(id: number): Promise<TaskWithRelations | undefined> {
+    await db.update(tasks).set({
+      status: "offen",
+      completedAt: null,
+      completedById: null,
+      updatedAt: new Date(),
+    }).where(eq(tasks.id, id));
+    await db.delete(taskReminderLog).where(eq(taskReminderLog.taskId, id));
+    return this.getTaskById(id);
+  }
+
+  async deleteTask(id: number): Promise<void> {
+    await db.delete(tasks).where(eq(tasks.id, id));
+  }
+
+  // Comments
+  async getTaskComments(taskId: number): Promise<TaskComment[]> {
+    return db.select().from(taskComments).where(eq(taskComments.taskId, taskId)).orderBy(asc(taskComments.createdAt));
+  }
+
+  async createTaskComment(input: InsertTaskComment): Promise<TaskComment> {
+    const [created] = await db.insert(taskComments).values(input).returning();
+    return created;
+  }
+
+  async deleteTaskComment(id: number): Promise<void> {
+    await db.delete(taskComments).where(eq(taskComments.id, id));
+  }
+
+  // Attachments
+  async createTaskAttachment(input: { taskId: number; filename: string; mimeType: string; size: number; data: string; uploadedById: number; }): Promise<TaskAttachment> {
+    const [created] = await db.insert(taskAttachments).values(input).returning();
+    return created;
+  }
+
+  async getTaskAttachment(id: number): Promise<TaskAttachment | undefined> {
+    const [row] = await db.select().from(taskAttachments).where(eq(taskAttachments.id, id));
+    return row;
+  }
+
+  async deleteTaskAttachment(id: number): Promise<void> {
+    await db.delete(taskAttachments).where(eq(taskAttachments.id, id));
+  }
+
+  // Reminder log
+  async hasReminderBeenSent(taskId: number, type: "reminder" | "escalation"): Promise<boolean> {
+    const rows = await db.select().from(taskReminderLog)
+      .where(and(eq(taskReminderLog.taskId, taskId), eq(taskReminderLog.type, type)));
+    return rows.length > 0;
+  }
+
+  async logReminderSent(taskId: number, type: "reminder" | "escalation"): Promise<void> {
+    await db.insert(taskReminderLog).values({ taskId, type });
+  }
+
+  async getTasksDueWithinHours(hours: number): Promise<TaskWithRelations[]> {
+    const now = new Date();
+    const horizon = new Date(now.getTime() + hours * 60 * 60 * 1000);
+    const rows = await db.select().from(tasks).where(and(
+      isNotNull(tasks.dueDate),
+      gte(tasks.dueDate, now),
+      lte(tasks.dueDate, horizon),
+      sql`${tasks.status} != 'erledigt'`,
+    ));
+    return this.hydrateTasks(rows);
+  }
+
+  async getOverdueTasks(): Promise<TaskWithRelations[]> {
+    const now = new Date();
+    const rows = await db.select().from(tasks).where(and(
+      isNotNull(tasks.dueDate),
+      lte(tasks.dueDate, now),
+      sql`${tasks.status} != 'erledigt'`,
+    ));
+    return this.hydrateTasks(rows);
+  }
+
+  // Notes
+  private async hydrateNotes(rows: Note[]): Promise<NoteWithAttachments[]> {
+    if (rows.length === 0) return [];
+    const ids = rows.map(n => n.id);
+    const attachmentRows = await db.select({
+      id: noteAttachments.id, noteId: noteAttachments.noteId,
+      filename: noteAttachments.filename, mimeType: noteAttachments.mimeType,
+      size: noteAttachments.size, uploadedById: noteAttachments.uploadedById,
+      uploadedAt: noteAttachments.uploadedAt,
+    }).from(noteAttachments).where(inArray(noteAttachments.noteId, ids));
+    return rows.map(n => ({
+      ...n,
+      attachments: attachmentRows.filter(a => a.noteId === n.id).map(({ noteId, ...rest }) => rest),
+    }));
+  }
+
+  async getNotesForUser(userId: number): Promise<NoteWithAttachments[]> {
+    const rows = await db.select().from(notes).where(
+      or(eq(notes.createdById, userId), eq(notes.visibility, "public"))!
+    ).orderBy(desc(notes.updatedAt));
+    return this.hydrateNotes(rows);
+  }
+
+  async getNoteById(id: number): Promise<NoteWithAttachments | undefined> {
+    const [row] = await db.select().from(notes).where(eq(notes.id, id));
+    if (!row) return undefined;
+    const [hydrated] = await this.hydrateNotes([row]);
+    return hydrated;
+  }
+
+  async createNote(input: InsertNote): Promise<NoteWithAttachments> {
+    const [created] = await db.insert(notes).values(input).returning();
+    return (await this.getNoteById(created.id))!;
+  }
+
+  async updateNote(id: number, updates: Partial<InsertNote>): Promise<NoteWithAttachments | undefined> {
+    await db.update(notes).set({ ...updates, updatedAt: new Date() }).where(eq(notes.id, id));
+    return this.getNoteById(id);
+  }
+
+  async completeNote(id: number): Promise<NoteWithAttachments | undefined> {
+    await db.update(notes).set({ completedAt: new Date(), updatedAt: new Date() }).where(eq(notes.id, id));
+    return this.getNoteById(id);
+  }
+
+  async reopenNote(id: number): Promise<NoteWithAttachments | undefined> {
+    await db.update(notes).set({ completedAt: null, updatedAt: new Date() }).where(eq(notes.id, id));
+    return this.getNoteById(id);
+  }
+
+  async deleteNote(id: number): Promise<void> {
+    await db.delete(notes).where(eq(notes.id, id));
+  }
+
+  async createNoteAttachment(input: { noteId: number; filename: string; mimeType: string; size: number; data: string; uploadedById: number; }): Promise<NoteAttachment> {
+    const [created] = await db.insert(noteAttachments).values(input).returning();
+    return created;
+  }
+
+  async getNoteAttachment(id: number): Promise<NoteAttachment | undefined> {
+    const [row] = await db.select().from(noteAttachments).where(eq(noteAttachments.id, id));
+    return row;
+  }
+
+  async deleteNoteAttachment(id: number): Promise<void> {
+    await db.delete(noteAttachments).where(eq(noteAttachments.id, id));
+  }
+
+  // Notification settings
+  async getNotificationSettings(userId: number): Promise<UserNotificationSettings> {
+    const [row] = await db.select().from(userNotificationSettings).where(eq(userNotificationSettings.userId, userId));
+    if (row) return row;
+    const [created] = await db.insert(userNotificationSettings).values({ userId, emailRemindersEnabled: true }).returning();
+    return created;
+  }
+
+  async updateNotificationSettings(userId: number, updates: Partial<InsertUserNotificationSettings>): Promise<UserNotificationSettings> {
+    const existing = await this.getNotificationSettings(userId);
+    const [updated] = await db.update(userNotificationSettings)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(userNotificationSettings.id, existing.id))
+      .returning();
+    return updated;
   }
 }
 

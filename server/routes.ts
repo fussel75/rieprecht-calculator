@@ -5,7 +5,8 @@ import { api } from "@shared/routes";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
-import { sendPasswordResetEmail, sendVerificationEmail, sendQuoteEmail, sendPriceCalculationEmail, sendReportEmail, sendPriceListEmail } from "./email";
+import { sendPasswordResetEmail, sendVerificationEmail, sendQuoteEmail, sendPriceCalculationEmail, sendReportEmail, sendPriceListEmail, sendTaskReminderEmail, sendTaskEscalationEmail, sendTaskAssignedEmail } from "./email";
+import { insertTaskSchema, insertTaskCommentSchema, insertNoteSchema } from "@shared/schema";
 import OpenAI from "openai";
 import { generateReportData, generateReportHTML, generateAnnualReportData, generateAnnualReportHTML, generateAnnualReportCSV, getDefaultForecastParams, getDefaultForecastParamsFromDB } from "./report";
 import { generatePdfFromHtml, generateCalculatorPdfHtml, generatePlanningPdfHtml, generateTripsPdfHtml, generateCustomersPdfHtml, generatePriceOptPdfHtml, generateCustomerPriceListHtml } from "./pdf";
@@ -3421,5 +3422,533 @@ Wichtig:
     }
   });
 
+  // ============================================================
+  // Aufgaben & Notizen
+  // ============================================================
+
+  const taskUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+  // Schlanke User-Liste für Aufgaben-Zuweisung (jeder eingeloggte User darf sehen, wem er Aufgaben zuweisen kann)
+  app.get("/api/users/assignable", requireAuth, async (_req, res) => {
+    const all = await storage.getAllUsers();
+    res.json(all.map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role })));
+  });
+
+  function canSeeTask(task: { createdById: number; assigneeIds: number[] }, userId: number): boolean {
+    return task.createdById === userId || task.assigneeIds.includes(userId);
+  }
+
+  // GET /api/tasks?scope=mine|created|all&status=&priority=&search=
+  app.get("/api/tasks", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const scope = (req.query.scope as string) || "mine";
+      const status = req.query.status as string | undefined;
+      const priority = req.query.priority as string | undefined;
+      const search = (req.query.search as string | undefined)?.toLowerCase();
+
+      let list = scope === "all"
+        ? await storage.getAllTasks()
+        : await storage.getTasksForUser(userId);
+
+      if (scope === "mine") {
+        list = list.filter(t => t.assigneeIds.includes(userId));
+      } else if (scope === "created") {
+        list = list.filter(t => t.createdById === userId);
+      }
+
+      if (status) list = list.filter(t => t.status === status);
+      if (priority) list = list.filter(t => t.priority === priority);
+      if (search) list = list.filter(t =>
+        t.title.toLowerCase().includes(search) ||
+        (t.description?.toLowerCase().includes(search) ?? false)
+      );
+
+      res.json(list);
+    } catch (err) {
+      console.error("List tasks error:", err);
+      res.status(500).json({ message: "Fehler beim Laden der Aufgaben" });
+    }
+  });
+
+  app.get("/api/tasks/:id", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const task = await storage.getTaskById(Number(req.params.id));
+      if (!task) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(task, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      res.json(task);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Laden der Aufgabe" });
+    }
+  });
+
+  app.post("/api/tasks", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const { assigneeIds, ...rest } = req.body ?? {};
+      const input = insertTaskSchema.omit({ createdById: true } as any).parse(rest);
+      const ids: number[] = Array.isArray(assigneeIds) ? assigneeIds.map(Number).filter(Boolean) : [];
+      const task = await storage.createTask({ ...input, createdById: userId } as any, userId, ids);
+
+      // Notify assignees (excluding creator)
+      const notifyIds = ids.filter(id => id !== userId);
+      if (notifyIds.length > 0) {
+        const allUsers = await storage.getAllUsers();
+        const assignees = allUsers.filter(u => notifyIds.includes(u.id));
+        const creator = allUsers.find(u => u.id === userId);
+        for (const a of assignees) {
+          if (!a.email) continue;
+          const settings = await storage.getNotificationSettings(a.id);
+          if (!settings.emailRemindersEnabled) continue;
+          sendTaskAssignedEmail({
+            to: a.email,
+            recipientName: a.name,
+            task,
+            creatorName: creator?.name || "Ein Kollege",
+          }).catch(e => console.error("Task assigned email failed:", e));
+        }
+      }
+
+      res.status(201).json(task);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      console.error("Create task error:", err);
+      res.status(500).json({ message: "Fehler beim Erstellen der Aufgabe" });
+    }
+  });
+
+  app.put("/api/tasks/:id", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getTaskById(id);
+      if (!existing) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(existing, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+
+      const { assigneeIds, ...rest } = req.body ?? {};
+      const partial = insertTaskSchema.omit({ createdById: true } as any).partial().parse(rest);
+      const task = await storage.updateTask(id, partial as any, Array.isArray(assigneeIds) ? assigneeIds.map(Number) : undefined);
+      res.json(task);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      console.error("Update task error:", err);
+      res.status(500).json({ message: "Fehler beim Aktualisieren der Aufgabe" });
+    }
+  });
+
+  app.post("/api/tasks/:id/complete", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getTaskById(id);
+      if (!existing) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(existing, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      const task = await storage.completeTask(id, userId);
+      res.json(task);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Abschließen" });
+    }
+  });
+
+  app.post("/api/tasks/:id/reopen", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getTaskById(id);
+      if (!existing) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(existing, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      const task = await storage.reopenTask(id);
+      res.json(task);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Reaktivieren" });
+    }
+  });
+
+  app.delete("/api/tasks/:id", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getTaskById(id);
+      if (!existing) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (existing.createdById !== userId) {
+        return res.status(403).json({ message: "Nur der Ersteller darf löschen" });
+      }
+      await storage.deleteTask(id);
+      res.status(204).send();
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Löschen" });
+    }
+  });
+
+  // Comments
+  app.get("/api/tasks/:id/comments", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const task = await storage.getTaskById(id);
+      if (!task) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(task, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      const comments = await storage.getTaskComments(id);
+      res.json(comments);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Laden der Kommentare" });
+    }
+  });
+
+  app.post("/api/tasks/:id/comments", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const task = await storage.getTaskById(id);
+      if (!task) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(task, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      const content = String(req.body?.content || "").trim();
+      if (!content) return res.status(400).json({ message: "Kommentar darf nicht leer sein" });
+      const comment = await storage.createTaskComment({ taskId: id, authorId: userId, content });
+      res.status(201).json(comment);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Speichern des Kommentars" });
+    }
+  });
+
+  // Attachments
+  app.post("/api/tasks/:id/attachments", requireAuth, taskUpload.single("file"), async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const task = await storage.getTaskById(id);
+      if (!task) return res.status(404).json({ message: "Aufgabe nicht gefunden" });
+      if (!canSeeTask(task, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      if (!req.file) return res.status(400).json({ message: "Keine Datei hochgeladen" });
+      const attachment = await storage.createTaskAttachment({
+        taskId: id,
+        filename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        data: req.file.buffer.toString("base64"),
+        uploadedById: userId,
+      });
+      const { data, ...rest } = attachment;
+      res.status(201).json(rest);
+    } catch (err) {
+      console.error("Task attachment upload error:", err);
+      res.status(500).json({ message: "Fehler beim Datei-Upload" });
+    }
+  });
+
+  app.get("/api/tasks/attachments/:attId/download", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const attachment = await storage.getTaskAttachment(Number(req.params.attId));
+      if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden" });
+      const task = await storage.getTaskById(attachment.taskId);
+      if (!task || !canSeeTask(task, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      const buf = Buffer.from(attachment.data, "base64");
+      res.setHeader("Content-Type", attachment.mimeType);
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(attachment.filename)}"`);
+      res.send(buf);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Download" });
+    }
+  });
+
+  app.delete("/api/tasks/attachments/:attId", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const attachment = await storage.getTaskAttachment(Number(req.params.attId));
+      if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden" });
+      const task = await storage.getTaskById(attachment.taskId);
+      if (!task || !canSeeTask(task, userId)) return res.status(403).json({ message: "Keine Berechtigung" });
+      await storage.deleteTaskAttachment(attachment.id);
+      res.status(204).send();
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Löschen" });
+    }
+  });
+
+  // ============================================================
+  // Notizen
+  // ============================================================
+
+  app.get("/api/notes", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const scope = (req.query.scope as string) || "all"; // all (mine + public) | mine | public
+      const search = (req.query.search as string | undefined)?.toLowerCase();
+      let list = await storage.getNotesForUser(userId);
+      if (scope === "mine") list = list.filter(n => n.createdById === userId);
+      else if (scope === "public") list = list.filter(n => n.visibility === "public");
+      if (search) list = list.filter(n =>
+        n.title.toLowerCase().includes(search) ||
+        (n.content?.toLowerCase().includes(search) ?? false)
+      );
+      res.json(list);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Laden der Notizen" });
+    }
+  });
+
+  app.get("/api/notes/:id", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const note = await storage.getNoteById(Number(req.params.id));
+      if (!note) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (note.createdById !== userId && note.visibility !== "public") {
+        return res.status(403).json({ message: "Keine Berechtigung" });
+      }
+      res.json(note);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Laden" });
+    }
+  });
+
+  app.post("/api/notes", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const input = insertNoteSchema.omit({ createdById: true } as any).parse(req.body);
+      const note = await storage.createNote({ ...input, createdById: userId } as any);
+      res.status(201).json(note);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Fehler beim Erstellen der Notiz" });
+    }
+  });
+
+  app.put("/api/notes/:id", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getNoteById(id);
+      if (!existing) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (existing.createdById !== userId) return res.status(403).json({ message: "Nur der Ersteller darf bearbeiten" });
+      const partial = insertNoteSchema.omit({ createdById: true } as any).partial().parse(req.body);
+      const note = await storage.updateNote(id, partial as any);
+      res.json(note);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      res.status(500).json({ message: "Fehler beim Aktualisieren" });
+    }
+  });
+
+  app.post("/api/notes/:id/complete", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getNoteById(id);
+      if (!existing) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (existing.createdById !== userId) return res.status(403).json({ message: "Nur der Ersteller darf erledigen" });
+      const note = await storage.completeNote(id);
+      res.json(note);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Abschließen" });
+    }
+  });
+
+  app.post("/api/notes/:id/reopen", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getNoteById(id);
+      if (!existing) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (existing.createdById !== userId) return res.status(403).json({ message: "Nur der Ersteller darf reaktivieren" });
+      const note = await storage.reopenNote(id);
+      res.json(note);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Reaktivieren" });
+    }
+  });
+
+  app.delete("/api/notes/:id", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const existing = await storage.getNoteById(id);
+      if (!existing) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (existing.createdById !== userId) return res.status(403).json({ message: "Nur der Ersteller darf löschen" });
+      await storage.deleteNote(id);
+      res.status(204).send();
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Löschen" });
+    }
+  });
+
+  app.post("/api/notes/:id/attachments", requireAuth, taskUpload.single("file"), async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const note = await storage.getNoteById(id);
+      if (!note) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (note.createdById !== userId) return res.status(403).json({ message: "Nur der Ersteller darf hochladen" });
+      if (!req.file) return res.status(400).json({ message: "Keine Datei hochgeladen" });
+      const attachment = await storage.createNoteAttachment({
+        noteId: id,
+        filename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        data: req.file.buffer.toString("base64"),
+        uploadedById: userId,
+      });
+      const { data, ...rest } = attachment;
+      res.status(201).json(rest);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Upload" });
+    }
+  });
+
+  app.get("/api/notes/attachments/:attId/download", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const attachment = await storage.getNoteAttachment(Number(req.params.attId));
+      if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden" });
+      const note = await storage.getNoteById(attachment.noteId);
+      if (!note) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (note.createdById !== userId && note.visibility !== "public") {
+        return res.status(403).json({ message: "Keine Berechtigung" });
+      }
+      const buf = Buffer.from(attachment.data, "base64");
+      res.setHeader("Content-Type", attachment.mimeType);
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(attachment.filename)}"`);
+      res.send(buf);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Download" });
+    }
+  });
+
+  app.delete("/api/notes/attachments/:attId", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const attachment = await storage.getNoteAttachment(Number(req.params.attId));
+      if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden" });
+      const note = await storage.getNoteById(attachment.noteId);
+      if (!note || note.createdById !== userId) return res.status(403).json({ message: "Keine Berechtigung" });
+      await storage.deleteNoteAttachment(attachment.id);
+      res.status(204).send();
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Löschen" });
+    }
+  });
+
+  app.post("/api/notes/:id/convert-to-task", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const id = Number(req.params.id);
+      const note = await storage.getNoteById(id);
+      if (!note) return res.status(404).json({ message: "Notiz nicht gefunden" });
+      if (note.createdById !== userId && note.visibility !== "public") {
+        return res.status(403).json({ message: "Keine Berechtigung" });
+      }
+      const task = await storage.createTask({
+        title: note.title,
+        description: note.content ?? undefined,
+        priority: "mittel",
+        status: "offen",
+      } as any, userId, [userId]);
+      // copy attachments
+      for (const att of note.attachments) {
+        const full = await storage.getNoteAttachment(att.id);
+        if (full) {
+          await storage.createTaskAttachment({
+            taskId: task.id,
+            filename: full.filename,
+            mimeType: full.mimeType,
+            size: full.size,
+            data: full.data,
+            uploadedById: userId,
+          });
+        }
+      }
+      res.status(201).json(await storage.getTaskById(task.id));
+    } catch (err) {
+      console.error("Convert note error:", err);
+      res.status(500).json({ message: "Fehler beim Umwandeln" });
+    }
+  });
+
+  // Notification settings
+  app.get("/api/notification-settings", requireAuth, async (req, res) => {
+    try {
+      const settings = await storage.getNotificationSettings(req.session.userId!);
+      res.json(settings);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Laden" });
+    }
+  });
+
+  app.put("/api/notification-settings", requireAuth, async (req, res) => {
+    try {
+      const userId = req.session.userId!;
+      const enabled = !!req.body?.emailRemindersEnabled;
+      const settings = await storage.updateNotificationSettings(userId, { userId, emailRemindersEnabled: enabled });
+      res.json(settings);
+    } catch (err) {
+      res.status(500).json({ message: "Fehler beim Speichern" });
+    }
+  });
+
   return httpServer;
+}
+
+// ============================================================
+// Reminder-Job (von server/index.ts aufgerufen)
+// ============================================================
+
+export async function runTaskReminders(): Promise<{ reminders: number; escalations: number }> {
+  let reminders = 0;
+  let escalations = 0;
+
+  const allUsers = await storage.getAllUsers();
+  const userById = new Map(allUsers.map(u => [u.id, u]));
+
+  // 24h Reminder
+  const upcoming = await storage.getTasksDueWithinHours(24);
+  for (const task of upcoming) {
+    if (await storage.hasReminderBeenSent(task.id, "reminder")) continue;
+    const recipients: { email: string; name: string }[] = [];
+    for (const aid of task.assigneeIds) {
+      const u = userById.get(aid);
+      if (!u?.email) continue;
+      const settings = await storage.getNotificationSettings(u.id);
+      if (settings.emailRemindersEnabled) recipients.push({ email: u.email, name: u.name });
+    }
+    if (recipients.length > 0) {
+      await sendTaskReminderEmail({ recipients, task });
+      reminders++;
+    }
+    await storage.logReminderSent(task.id, "reminder");
+  }
+
+  // Escalation for overdue
+  const overdue = await storage.getOverdueTasks();
+  for (const task of overdue) {
+    if (await storage.hasReminderBeenSent(task.id, "escalation")) continue;
+    const recipients: { email: string; name: string }[] = [];
+    for (const aid of task.assigneeIds) {
+      const u = userById.get(aid);
+      if (!u?.email) continue;
+      const settings = await storage.getNotificationSettings(u.id);
+      if (settings.emailRemindersEnabled) recipients.push({ email: u.email, name: u.name });
+    }
+    const creator = userById.get(task.createdById);
+    const cc: string[] = [];
+    if (creator?.email && !recipients.some(r => r.email === creator.email)) {
+      const cs = await storage.getNotificationSettings(creator.id);
+      if (cs.emailRemindersEnabled) cc.push(creator.email);
+    }
+    if (recipients.length > 0 || cc.length > 0) {
+      await sendTaskEscalationEmail({ recipients, cc, task });
+      escalations++;
+    }
+    await storage.logReminderSent(task.id, "escalation");
+  }
+
+  return { reminders, escalations };
 }

@@ -19,6 +19,7 @@ import ComprehensiveReport from "@/pages/ComprehensiveReport";
 import ForecastCenter from "@/pages/ForecastCenter";
 import BWA from "@/pages/BWA";
 import Articles from "@/pages/Articles";
+import TasksNotes from "@/pages/TasksNotes";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import ForgotPassword from "@/pages/ForgotPassword";
@@ -112,6 +113,9 @@ function AuthenticatedLayout() {
             </Route>
             <Route path="/articles">
               <ProtectedRoute component={Articles} />
+            </Route>
+            <Route path="/tasks">
+              <ProtectedRoute component={TasksNotes} />
             </Route>
             <Route component={NotFound} />
           </Switch>

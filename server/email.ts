@@ -779,3 +779,184 @@ export async function sendPriceListEmail(to: string, pdfBuffer: Buffer, customer
     return false;
   }
 }
+
+// ============================================================
+// Aufgaben & Notizen — Reminder & Eskalation
+// ============================================================
+
+interface TaskEmailRecipient {
+  email: string;
+  name: string;
+}
+
+interface TaskEmailData {
+  id: number;
+  title: string;
+  description?: string | null;
+  dueDate?: Date | string | null;
+  priority: string;
+  status: string;
+}
+
+function priorityLabel(p: string): string {
+  switch (p) {
+    case "niedrig": return "Niedrig";
+    case "hoch": return "Hoch";
+    case "dringend": return "Dringend";
+    default: return "Mittel";
+  }
+}
+
+function priorityColor(p: string): string {
+  switch (p) {
+    case "niedrig": return "#6b7280";
+    case "hoch": return "#ea580c";
+    case "dringend": return "#dc2626";
+    default: return "#2563eb";
+  }
+}
+
+function formatGermanDateTime(d: Date | string | null | undefined): string {
+  if (!d) return "—";
+  const date = typeof d === "string" ? new Date(d) : d;
+  return date.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function taskEmailShell(opts: {
+  headlineColor: string;
+  headline: string;
+  intro: string;
+  task: TaskEmailData;
+  ctaLabel: string;
+}): string {
+  const taskUrl = `${getBaseUrl()}/tasks?taskId=${opts.task.id}`;
+  const desc = opts.task.description
+    ? `<p style="margin: 12px 0; color: #374151; white-space: pre-wrap;">${escapeHtml(opts.task.description).slice(0, 600)}</p>`
+    : "";
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937; margin: 0; padding: 0; background: #f3f4f6;">
+      <div style="max-width: 600px; margin: 20px auto; background: white; border-radius: 8px; overflow: hidden;">
+        <div style="background: ${opts.headlineColor}; color: white; padding: 22px 28px;">
+          <h1 style="margin: 0; font-size: 22px;">${opts.headline}</h1>
+          <p style="margin: 4px 0 0; opacity: 0.9; font-size: 13px;">Rieprecht Container Calculator · Aufgaben</p>
+        </div>
+        <div style="padding: 24px 28px;">
+          <p style="margin: 0 0 18px; font-size: 15px;">${opts.intro}</p>
+
+          <div style="border: 1px solid #e5e7eb; border-radius: 6px; padding: 16px 18px; background: #fafafa;">
+            <h2 style="margin: 0 0 8px; font-size: 18px; color: #111827;">${escapeHtml(opts.task.title)}</h2>
+            <p style="margin: 0 0 4px; font-size: 13px;">
+              <strong>Fällig:</strong> ${formatGermanDateTime(opts.task.dueDate)}
+              &nbsp;·&nbsp;
+              <span style="display: inline-block; padding: 2px 8px; border-radius: 999px; background: ${priorityColor(opts.task.priority)}; color: white; font-size: 11px; font-weight: 600;">
+                ${priorityLabel(opts.task.priority)}
+              </span>
+            </p>
+            ${desc}
+          </div>
+
+          <p style="text-align: center; margin: 24px 0;">
+            <a href="${taskUrl}" style="display: inline-block; background: #2563eb; color: white; padding: 12px 22px; border-radius: 6px; text-decoration: none; font-weight: 600;">
+              ${opts.ctaLabel}
+            </a>
+          </p>
+
+          <p style="font-size: 12px; color: #6b7280; margin: 24px 0 0;">
+            Sie können E-Mail-Erinnerungen in den Benachrichtigungs-Einstellungen deaktivieren.
+          </p>
+        </div>
+        <div style="background: #f3f4f6; padding: 14px; text-align: center; font-size: 11px; color: #6b7280;">
+          Rieprecht GmbH · Diese E-Mail wurde automatisch generiert.
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+export async function sendTaskAssignedEmail(args: {
+  to: string;
+  recipientName: string;
+  task: TaskEmailData;
+  creatorName: string;
+}): Promise<boolean> {
+  try {
+    const { client, fromEmail } = await getResendClient();
+    const html = taskEmailShell({
+      headlineColor: "#2563eb",
+      headline: "Neue Aufgabe für Sie",
+      intro: `Hallo ${escapeHtml(args.recipientName)}, <strong>${escapeHtml(args.creatorName)}</strong> hat Ihnen eine neue Aufgabe zugewiesen:`,
+      task: args.task,
+      ctaLabel: "Aufgabe öffnen",
+    });
+    await client.emails.send({
+      from: fromEmail,
+      to: [args.to],
+      subject: `Neue Aufgabe: ${args.task.title}`,
+      html,
+    });
+    return true;
+  } catch (error) {
+    console.error("Failed to send task assigned email:", error);
+    return false;
+  }
+}
+
+export async function sendTaskReminderEmail(args: {
+  recipients: TaskEmailRecipient[];
+  task: TaskEmailData;
+}): Promise<boolean> {
+  try {
+    const { client, fromEmail } = await getResendClient();
+    const html = taskEmailShell({
+      headlineColor: "#ea580c",
+      headline: "Erinnerung: Aufgabe wird bald fällig",
+      intro: `Diese Aufgabe ist in den nächsten 24 Stunden fällig:`,
+      task: args.task,
+      ctaLabel: "Jetzt öffnen",
+    });
+    await client.emails.send({
+      from: fromEmail,
+      to: args.recipients.map(r => r.email),
+      subject: `Erinnerung: ${args.task.title} (fällig ${formatGermanDateTime(args.task.dueDate)})`,
+      html,
+    });
+    return true;
+  } catch (error) {
+    console.error("Failed to send task reminder email:", error);
+    return false;
+  }
+}
+
+export async function sendTaskEscalationEmail(args: {
+  recipients: TaskEmailRecipient[];
+  cc: string[];
+  task: TaskEmailData;
+}): Promise<boolean> {
+  try {
+    const { client, fromEmail } = await getResendClient();
+    const html = taskEmailShell({
+      headlineColor: "#dc2626",
+      headline: "Aufgabe überfällig",
+      intro: `Diese Aufgabe ist überfällig und noch nicht erledigt:`,
+      task: args.task,
+      ctaLabel: "Jetzt erledigen",
+    });
+    const to = args.recipients.length > 0 ? args.recipients.map(r => r.email) : args.cc;
+    const cc = args.recipients.length > 0 ? args.cc : [];
+    await client.emails.send({
+      from: fromEmail,
+      to,
+      cc: cc.length > 0 ? cc : undefined,
+      subject: `Überfällig: ${args.task.title}`,
+      html,
+    });
+    return true;
+  } catch (error) {
+    console.error("Failed to send task escalation email:", error);
+    return false;
+  }
+}

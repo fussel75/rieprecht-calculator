@@ -565,6 +565,119 @@ export const insertPartnerPlzExceptionSchema = createInsertSchema(partnerPlzExce
 export type PartnerPlzException = typeof partnerPlzExceptions.$inferSelect;
 export type InsertPartnerPlzException = z.infer<typeof insertPartnerPlzExceptionSchema>;
 
+// ============================================================
+// Aufgaben & Notizen
+// ============================================================
+
+// Aufgaben (Tasks)
+export const tasks = pgTable("tasks", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  description: text("description"),
+  dueDate: timestamp("due_date"),
+  priority: text("priority").notNull().default("mittel"), // 'niedrig' | 'mittel' | 'hoch' | 'dringend'
+  status: text("status").notNull().default("offen"), // 'offen' | 'in_bearbeitung' | 'erledigt'
+  recurrence: text("recurrence").default("none"), // 'none' | 'daily' | 'weekly' | 'monthly'
+  createdById: integer("created_by_id").references(() => users.id).notNull(),
+  completedById: integer("completed_by_id").references(() => users.id),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Aufgaben-Zuweisungen (m:n)
+export const taskAssignees = pgTable("task_assignees", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").references(() => tasks.id, { onDelete: "cascade" }).notNull(),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Aufgaben-Kommentare / Verlauf
+export const taskComments = pgTable("task_comments", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").references(() => tasks.id, { onDelete: "cascade" }).notNull(),
+  authorId: integer("author_id").references(() => users.id).notNull(),
+  content: text("content").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Aufgaben-Anhänge (Datei in der DB als bytea-äquivalent über text/base64 oder blob)
+// Wir speichern den binary content in einem separaten Feld; Drizzle/pg unterstützt bytea via custom — hier als text base64 für Einfachheit.
+export const taskAttachments = pgTable("task_attachments", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").references(() => tasks.id, { onDelete: "cascade" }).notNull(),
+  filename: text("filename").notNull(),
+  mimeType: text("mime_type").notNull(),
+  size: integer("size").notNull(),
+  data: text("data").notNull(), // base64-kodiert
+  uploadedById: integer("uploaded_by_id").references(() => users.id).notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+
+// Reminder-Log (verhindert doppelte E-Mails pro Aufgabe/Typ)
+export const taskReminderLog = pgTable("task_reminder_log", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").references(() => tasks.id, { onDelete: "cascade" }).notNull(),
+  type: text("type").notNull(), // 'reminder' | 'escalation'
+  sentAt: timestamp("sent_at").defaultNow(),
+});
+
+// Notizen
+export const notes = pgTable("notes", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  content: text("content"),
+  visibility: text("visibility").notNull().default("private"), // 'private' | 'public'
+  createdById: integer("created_by_id").references(() => users.id).notNull(),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Notiz-Anhänge
+export const noteAttachments = pgTable("note_attachments", {
+  id: serial("id").primaryKey(),
+  noteId: integer("note_id").references(() => notes.id, { onDelete: "cascade" }).notNull(),
+  filename: text("filename").notNull(),
+  mimeType: text("mime_type").notNull(),
+  size: integer("size").notNull(),
+  data: text("data").notNull(), // base64-kodiert
+  uploadedById: integer("uploaded_by_id").references(() => users.id).notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+
+// Benachrichtigungs-Einstellungen pro User
+export const userNotificationSettings = pgTable("user_notification_settings", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }).notNull().unique(),
+  emailRemindersEnabled: boolean("email_reminders_enabled").default(true),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertTaskSchema = createInsertSchema(tasks, {
+  dueDate: z.coerce.date().nullable().optional(),
+}).omit({ id: true, createdAt: true, updatedAt: true, completedAt: true, completedById: true });
+export type Task = typeof tasks.$inferSelect;
+export type InsertTask = z.infer<typeof insertTaskSchema>;
+
+export const insertTaskCommentSchema = createInsertSchema(taskComments).omit({ id: true, createdAt: true });
+export type TaskComment = typeof taskComments.$inferSelect;
+export type InsertTaskComment = z.infer<typeof insertTaskCommentSchema>;
+
+export type TaskAssignee = typeof taskAssignees.$inferSelect;
+export type TaskAttachment = typeof taskAttachments.$inferSelect;
+
+export const insertNoteSchema = createInsertSchema(notes).omit({ id: true, createdAt: true, updatedAt: true, completedAt: true });
+export type Note = typeof notes.$inferSelect;
+export type InsertNote = z.infer<typeof insertNoteSchema>;
+
+export type NoteAttachment = typeof noteAttachments.$inferSelect;
+
+export const insertUserNotificationSettingsSchema = createInsertSchema(userNotificationSettings).omit({ id: true, updatedAt: true });
+export type UserNotificationSettings = typeof userNotificationSettings.$inferSelect;
+export type InsertUserNotificationSettings = z.infer<typeof insertUserNotificationSettingsSchema>;
+
 export const partnerSettings = pgTable("partner_settings", {
   id: serial("id").primaryKey(),
   shopName: text("shop_name").default("Rieprecht GmbH"),
