@@ -1,0 +1,167 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+}
+
+:root {
+  --font-sans: 'Inter', sans-serif;
+  --font-display: 'Plus Jakarta Sans', sans-serif;
+
+  /* Rieprecht Green/Teal Palette - Modern & Professional */
+  --background: 150 10% 98%;
+  --foreground: 160 25% 10%;
+  
+  --primary: 158 64% 32%; /* Rieprecht green/teal */
+  --primary-foreground: 0 0% 100%;
+  
+  --secondary: 150 10% 93%;
+  --secondary-foreground: 160 25% 15%;
+  
+  --muted: 150 8% 90%;
+  --muted-foreground: 160 10% 45%;
+  
+  --accent: 45 93% 47%; /* Warm yellow/gold accent */
+  --accent-foreground: 160 25% 10%;
+  
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  
+  --border: 150 10% 88%;
+  --input: 150 10% 88%;
+  --ring: 158 64% 32%;
+  
+  --card: 0 0% 100%;
+  --card-foreground: 160 25% 10%;
+  
+  --popover: 0 0% 100%;
+  --popover-foreground: 160 25% 10%;
+
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: 160 15% 8%;
+  --foreground: 150 10% 95%;
+  
+  --primary: 158 55% 45%;
+  --primary-foreground: 0 0% 100%;
+  
+  --secondary: 160 15% 15%;
+  --secondary-foreground: 150 10% 90%;
+  
+  --muted: 160 15% 18%;
+  --muted-foreground: 150 10% 55%;
+  
+  --accent: 45 90% 55%;
+  --accent-foreground: 160 25% 10%;
+  
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  
+  --border: 160 15% 20%;
+  --input: 160 15% 20%;
+  --ring: 158 55% 45%;
+  
+  --card: 160 15% 12%;
+  --card-foreground: 150 10% 95%;
+  
+  --popover: 160 15% 12%;
+  --popover-foreground: 150 10% 95%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    @apply font-bold tracking-tight;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90 transition-all duration-200;
+  }
+  
+  .card-elevated {
+    @apply bg-card rounded-xl border border-border/50 shadow-sm hover:shadow-md transition-shadow duration-200;
+  }
+}
+
+/* Modern Gradient for Hero/Price Cards */
+.bg-industrial-gradient {
+  background: linear-gradient(135deg, hsl(158 64% 32%), hsl(165 50% 25%));
+}
+
+/* Subtle dot pattern background */
+.bg-subtle-pattern {
+  background-color: hsl(var(--background));
+  background-image: radial-gradient(hsl(var(--primary) / 0.03) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Glass effect for modern cards */
+.glass-effect {
+  backdrop-filter: blur(12px);
+  background: hsl(var(--card) / 0.8);
+}
+
+/* Smooth scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* Animation utilities */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.4s ease-out;
+}
+
+/* Hide scrollbar utility */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}

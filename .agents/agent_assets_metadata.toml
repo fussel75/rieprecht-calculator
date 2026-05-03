@@ -1,0 +1,20 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "3l3ElIzeewtPFQNfp2Irc"
+uri = "file://Partner-API-Dokumentation.zip"
+type = "unspecified"
+title = "Partner-API Dokumentation (ZIP)"
+
+[[outputs]]
+id = "qu0TBks67JhljqqcBRvDP"
+uri = "file://export/Partner-API-Dokumentation.md"
+type = "text"
+title = "Rieprecht Partner-API Dokumentation"
+
+[[outputs]]
+id = "Pwo9HSCVSVX2HSWgmIssJ"
+uri = "file://partner-api-update-artikelnummer.md"
+type = "text"
+title = "API-Update Dokumentation für Partner-App"
